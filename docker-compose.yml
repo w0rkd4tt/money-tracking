@@ -1,0 +1,92 @@
+name: money-tracking
+
+x-common: &common
+  env_file: .env
+  restart: unless-stopped
+  # Linux hosts need this to reach Ollama on host. On Docker Desktop (macOS/Windows)
+  # host.docker.internal is built-in and this line is harmless.
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: moneytrack-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-money}
+      POSTGRES_USER: ${POSTGRES_USER:-money}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-money}
+    volumes:
+      - ./data/pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-money} -d ${POSTGRES_DB:-money}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  api:
+    <<: *common
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: moneytrack-api
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./backups:/app/backups
+    ports:
+      # Dual-bind: localhost only + one explicit allow-list IP (e.g. Tailscale).
+      # Leave APP_ALLOW_IP empty in .env to allow ONLY localhost.
+      - "127.0.0.1:${APP_PORT_API:-8000}:8000"
+      - "${APP_ALLOW_IP:-127.0.0.2}:${APP_PORT_API:-8000}:8000"
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn money_api.main:app --host 0.0.0.0 --port 8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+
+  web:
+    <<: *common
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: moneytrack-web
+    depends_on: [api]
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:${APP_PORT_API:-8000}/api/v1
+    ports:
+      - "127.0.0.1:${APP_PORT_WEB:-3000}:3000"
+      - "${APP_ALLOW_IP:-127.0.0.2}:${APP_PORT_WEB:-3000}:3000"
+
+  bot:
+    <<: *common
+    build:
+      context: ./apps/bot
+      dockerfile: Dockerfile
+    container_name: moneytrack-bot
+    depends_on: [api]
+    environment:
+      API_URL: http://api:8000/api/v1
+    deploy:
+      replicas: 1
+
+  gmail:
+    <<: *common
+    build:
+      context: ./apps/gmail_poller
+      dockerfile: Dockerfile
+    container_name: moneytrack-gmail
+    depends_on: [api]
+    environment:
+      API_URL: http://api:8000/api/v1

@@ -1,0 +1,118 @@
+# =============================================================================
+# Secrets & credentials — NEVER commit
+# =============================================================================
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+*credentials*.json
+*client_secret*.json
+*oauth*.json
+token.json
+*.age
+
+# =============================================================================
+# User data — contains financial info
+# =============================================================================
+data/
+!data/.gitkeep
+backups/
+!backups/.gitkeep
+logs/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# =============================================================================
+# LLM artifacts
+# =============================================================================
+# Ollama models downloaded locally (if any outside volume)
+models/
+*.gguf
+*.safetensors
+llm-cache/
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+.eggs/
+*.egg-info/
+*.egg
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+.uv/
+uv-cache/
+
+# =============================================================================
+# Node / Next.js
+# =============================================================================
+node_modules/
+.next/
+out/
+build/
+dist/
+.turbo/
+.pnpm-store/
+*.tsbuildinfo
+next-env.d.ts
+.yarn/
+.pnp.*
+
+# =============================================================================
+# Editor / OS
+# =============================================================================
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+.idea/
+.claude/settings.local.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# =============================================================================
+# Docker / build
+# =============================================================================
+docker-compose.override.yml
+.docker/
+
+# =============================================================================
+# Test / temp
+# =============================================================================
+.tmp/
+tmp/
+*.log
+coverage/
+.nyc_output/
+
+# =============================================================================
+# LLM conversation logs (may contain user content)
+# =============================================================================
+llm-logs/
+*.jsonl
+!tests/**/*.jsonl
+!fixtures/**/*.jsonl

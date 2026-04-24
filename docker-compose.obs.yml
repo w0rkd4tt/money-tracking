@@ -1,0 +1,39 @@
+name: money-tracking
+
+# Optional observability stack (Langfuse self-host v2).
+# Use:
+#   docker compose --profile obs -f docker-compose.yml -f docker-compose.obs.yml up -d
+
+services:
+  langfuse-db:
+    image: postgres:16-alpine
+    profiles: ["obs"]
+    environment:
+      POSTGRES_DB: langfuse
+      POSTGRES_USER: langfuse
+      POSTGRES_PASSWORD: ${LANGFUSE_DB_PASSWORD}
+    volumes:
+      - langfuse-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U langfuse"]
+      interval: 10s
+    restart: unless-stopped
+
+  langfuse:
+    image: langfuse/langfuse:2
+    profiles: ["obs"]
+    depends_on:
+      langfuse-db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://langfuse:${LANGFUSE_DB_PASSWORD}@langfuse-db:5432/langfuse
+      NEXTAUTH_URL: http://localhost:3001
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET}
+      SALT: ${LANGFUSE_SALT}
+      TELEMETRY_ENABLED: "false"
+    ports:
+      - "127.0.0.1:3001:3000"
+    restart: unless-stopped
+
+volumes:
+  langfuse-pg:
