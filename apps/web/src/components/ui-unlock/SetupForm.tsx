@@ -2,6 +2,7 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { markSession } from "@/lib/session-mark";
 import { RecoveryKeyPanel } from "./RecoveryKeyPanel";
 
 async function fetchJSON<T>(
@@ -19,6 +20,10 @@ async function fetchJSON<T>(
   return r.json();
 }
 
+function keepDigits(s: string, max = 6) {
+  return s.replace(/\D/g, "").slice(0, max);
+}
+
 export function SetupForm() {
   const router = useRouter();
   const [p1, setP1] = useState("");
@@ -30,19 +35,20 @@ export function SetupForm() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
-    if (p1.length < 8) {
-      setErr("Mật khẩu tối thiểu 8 ký tự");
+    if (!/^\d{6}$/.test(p1)) {
+      setErr("Mã PIN phải đúng 6 chữ số (0-9)");
       return;
     }
     if (p1 !== p2) {
-      setErr("Xác nhận mật khẩu không khớp");
+      setErr("Xác nhận mã PIN không khớp");
       return;
     }
     setBusy(true);
     try {
       const res = await fetchJSON<{ recovery_key: string }>("/api/v1/ui/setup", {
-        json: { passphrase: p1 },
+        json: { pin: p1 },
       });
+      markSession();
       setRecovery(res.recovery_key);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -67,31 +73,39 @@ export function SetupForm() {
   return (
     <form onSubmit={submit} className="card flex flex-col gap-3">
       <label className="flex flex-col gap-1 text-sm">
-        <span className="muted">Mật khẩu (≥ 8 ký tự)</span>
+        <span className="muted">Mã PIN (6 chữ số)</span>
         <input
           type="password"
           autoFocus
-          className="field"
+          inputMode="numeric"
+          pattern="[0-9]{6}"
+          maxLength={6}
+          autoComplete="new-password"
+          className="field font-mono tracking-[0.4em] text-center text-lg"
           value={p1}
-          onChange={(e) => setP1(e.target.value)}
+          onChange={(e) => setP1(keepDigits(e.target.value))}
         />
       </label>
       <label className="flex flex-col gap-1 text-sm">
-        <span className="muted">Nhập lại mật khẩu</span>
+        <span className="muted">Nhập lại mã PIN</span>
         <input
           type="password"
-          className="field"
+          inputMode="numeric"
+          pattern="[0-9]{6}"
+          maxLength={6}
+          autoComplete="new-password"
+          className="field font-mono tracking-[0.4em] text-center text-lg"
           value={p2}
-          onChange={(e) => setP2(e.target.value)}
+          onChange={(e) => setP2(keepDigits(e.target.value))}
         />
       </label>
       {err && <div className="neg text-sm">{err}</div>}
       <button
         type="submit"
-        disabled={busy}
+        disabled={busy || p1.length !== 6 || p2.length !== 6}
         className="btn btn-grd-primary justify-center py-2.5"
       >
-        {busy ? "…" : "Tạo mật khẩu"}
+        {busy ? "…" : "Tạo mã PIN"}
       </button>
     </form>
   );

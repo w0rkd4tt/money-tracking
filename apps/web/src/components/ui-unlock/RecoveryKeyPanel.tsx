@@ -31,7 +31,7 @@ export function RecoveryKeyPanel({
         `Money Tracking — Recovery Key\n`,
         `Generated: ${new Date().toISOString()}\n\n`,
         `${recoveryKey}\n\n`,
-        `Use this to reset your passphrase if you forget it.\n`,
+        `Use this to reset your PIN if you forget it.\n`,
         `Keep it offline and private.\n`,
       ],
       { type: "text/plain" }
@@ -54,7 +54,7 @@ export function RecoveryKeyPanel({
         </h2>
         <p className="muted text-sm mt-1">
           Khoá này chỉ hiện <strong>một lần</strong>. Dùng để lấy lại truy cập
-          nếu quên mật khẩu. Lưu offline (password manager / giấy in), KHÔNG
+          nếu quên PIN. Lưu offline (password manager / giấy in), KHÔNG
           chụp màn hình cloud.
         </p>
       </div>
@@ -97,7 +97,7 @@ export function RecoveryKeyPanel({
         />
         <span>
           Tôi đã lưu khoá khôi phục ở nơi an toàn. Tôi hiểu nếu mất khoá này
-          và quên mật khẩu, không có cách nào lấy lại giao diện (dữ liệu DB
+          và quên PIN, không có cách nào lấy lại giao diện (dữ liệu DB
           plaintext vẫn còn — restore từ backup).
         </span>
       </label>

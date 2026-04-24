@@ -15,7 +15,8 @@
     "recharts": "^2.13.3",
     "clsx": "^2.1.1",
     "tailwind-merge": "^2.5.4",
-    "lucide-react": "^0.460.0"
+    "lucide-react": "^0.460.0",
+    "@simplewebauthn/browser": "^11.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.9.0",

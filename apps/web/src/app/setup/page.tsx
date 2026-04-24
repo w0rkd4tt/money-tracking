@@ -18,7 +18,7 @@ export default async function SetupPage() {
       <div>
         <h1 className="text-2xl font-bold">🔐 Thiết lập lần đầu</h1>
         <p className="muted text-sm mt-1">
-          Tạo mật khẩu để khoá giao diện web. Sau đó bạn sẽ nhận một{" "}
+          Tạo mã PIN 6 chữ số để khoá giao diện web. Sau đó bạn sẽ nhận một{" "}
           <strong>khoá khôi phục (recovery key)</strong> — lưu ngay vì chỉ hiển
           thị <em>một lần</em>.
         </p>

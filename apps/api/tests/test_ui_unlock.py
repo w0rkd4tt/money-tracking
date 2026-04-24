@@ -23,45 +23,48 @@ async def test_status_not_configured(client):
 
 @pytest.mark.asyncio
 async def test_setup_then_status_unlocked(client):
-    r = await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+    r = await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     assert r.status_code == 201, r.text
     body = r.json()
-    # Recovery key in format XXXX-XXXX-XXXX-XXXX-XXXX-XXXX (6 groups of 4)
+    # Recovery key: 20-byte base32 → 32 chars → 8 groups of 4, 7 hyphens
     rk = body["recovery_key"]
-    # 20-byte base32 → 32 chars → 8 groups of 4, 7 hyphens
     assert rk.count("-") == 7
     assert all(len(g) == 4 for g in rk.split("-"))
 
     # Cookie was set → status shows unlocked
     r = await client.get("/api/v1/ui/status")
     assert r.status_code == 200
-    assert r.json() == {"configured": True, "unlocked": True}
+    body = r.json()
+    assert body["configured"] is True
+    assert body["unlocked"] is True
 
 
 @pytest.mark.asyncio
 async def test_duplicate_setup_rejected(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
-    r = await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
+    r = await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     assert r.status_code == 409
 
 
 @pytest.mark.asyncio
-async def test_unlock_wrong_passphrase(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+async def test_unlock_wrong_pin(client):
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     # Simulate a fresh browser — clear cookies
     client.cookies.clear()
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "wrong-password"})
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "999999"})
     assert r.status_code == 401
     # Status still configured but not unlocked
     s = await client.get("/api/v1/ui/status")
-    assert s.json() == {"configured": True, "unlocked": False}
+    body = s.json()
+    assert body["configured"] is True
+    assert body["unlocked"] is False
 
 
 @pytest.mark.asyncio
 async def test_unlock_correct(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     client.cookies.clear()
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "hunter2hunter2"})
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "123456"})
     assert r.status_code == 200
     assert "mt_session" in r.cookies or "mt_session" in client.cookies
     s = await client.get("/api/v1/ui/status")
@@ -70,25 +73,27 @@ async def test_unlock_correct(client):
 
 @pytest.mark.asyncio
 async def test_logout(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     r = await client.post("/api/v1/ui/logout")
     assert r.status_code == 204
     s = await client.get("/api/v1/ui/status")
-    assert s.json() == {"configured": True, "unlocked": False}
+    body = s.json()
+    assert body["configured"] is True
+    assert body["unlocked"] is False
 
 
 @pytest.mark.asyncio
 async def test_rate_limit_after_failures(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     client.cookies.clear()
     # 5 failures → 6th should be 429
     for _ in range(5):
-        r = await client.post("/api/v1/ui/unlock", json={"passphrase": "bad"})
+        r = await client.post("/api/v1/ui/unlock", json={"pin": "000000"})
         assert r.status_code == 401
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "bad"})
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "000000"})
     assert r.status_code == 429
-    # Even correct passphrase is blocked during window
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "hunter2hunter2"})
+    # Even correct PIN is blocked during window
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "123456"})
     assert r.status_code == 429
     # Reset limiter state for subsequent tests
     from money_api.services.ui_unlock import reset_attempts
@@ -98,35 +103,35 @@ async def test_rate_limit_after_failures(client):
 
 
 @pytest.mark.asyncio
-async def test_change_passphrase(client):
+async def test_change_pin(client):
     setup_resp = (
-        await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+        await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     ).json()
     old_recovery = setup_resp["recovery_key"]
     r = await client.post(
-        "/api/v1/ui/change-passphrase",
-        json={"old_passphrase": "hunter2hunter2", "new_passphrase": "newnewnew123"},
+        "/api/v1/ui/change-pin",
+        json={"old_pin": "123456", "new_pin": "654321"},
     )
     assert r.status_code == 200, r.text
     new_recovery = r.json()["new_recovery_key"]
     assert new_recovery != old_recovery
-    # New passphrase works
+    # New PIN works
     client.cookies.clear()
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "newnewnew123"})
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "654321"})
     assert r.status_code == 200
-    # Old passphrase doesn't
+    # Old PIN doesn't
     client.cookies.clear()
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "hunter2hunter2"})
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "123456"})
     assert r.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_change_passphrase_requires_unlocked(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+async def test_change_pin_requires_unlocked(client):
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     client.cookies.clear()  # logged out
     r = await client.post(
-        "/api/v1/ui/change-passphrase",
-        json={"old_passphrase": "hunter2hunter2", "new_passphrase": "newnewnew123"},
+        "/api/v1/ui/change-pin",
+        json={"old_pin": "123456", "new_pin": "654321"},
     )
     assert r.status_code == 401
 
@@ -134,31 +139,31 @@ async def test_change_passphrase_requires_unlocked(client):
 @pytest.mark.asyncio
 async def test_recover_flow(client):
     setup_resp = (
-        await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+        await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     ).json()
     recovery_key = setup_resp["recovery_key"]
     client.cookies.clear()
     # Recover with the printed key (with hyphens) — test case-insensitive + hyphens
     r = await client.post(
         "/api/v1/ui/recover",
-        json={"recovery_key": recovery_key.lower(), "new_passphrase": "recovered123"},
+        json={"recovery_key": recovery_key.lower(), "new_pin": "222333"},
     )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["new_recovery_key"] != recovery_key
-    # New passphrase works
+    # New PIN works
     client.cookies.clear()
-    r = await client.post("/api/v1/ui/unlock", json={"passphrase": "recovered123"})
+    r = await client.post("/api/v1/ui/unlock", json={"pin": "222333"})
     assert r.status_code == 200
 
 
 @pytest.mark.asyncio
 async def test_recover_wrong_key(client):
-    await client.post("/api/v1/ui/setup", json={"passphrase": "hunter2hunter2"})
+    await client.post("/api/v1/ui/setup", json={"pin": "123456"})
     client.cookies.clear()
     r = await client.post(
         "/api/v1/ui/recover",
-        json={"recovery_key": "WRONG-KEY-HERE-0000", "new_passphrase": "x12345678"},
+        json={"recovery_key": "WRONG-KEY-HERE-0000", "new_pin": "222333"},
     )
     assert r.status_code == 401
     from money_api.services.ui_unlock import reset_attempts
@@ -167,9 +172,17 @@ async def test_recover_wrong_key(client):
 
 
 @pytest.mark.asyncio
-async def test_setup_too_short_passphrase(client):
-    r = await client.post("/api/v1/ui/setup", json={"passphrase": "abc"})
-    assert r.status_code == 422  # Pydantic min_length
+async def test_setup_rejects_non_numeric_pin(client):
+    r = await client.post("/api/v1/ui/setup", json={"pin": "abcdef"})
+    assert r.status_code == 422  # Pydantic pattern
+
+
+@pytest.mark.asyncio
+async def test_setup_rejects_wrong_length_pin(client):
+    r = await client.post("/api/v1/ui/setup", json={"pin": "12345"})
+    assert r.status_code == 422
+    r = await client.post("/api/v1/ui/setup", json={"pin": "1234567"})
+    assert r.status_code == 422
 
 
 @pytest.mark.asyncio

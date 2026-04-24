@@ -20,6 +20,10 @@ async function fetchJSON<T>(
   return r.json();
 }
 
+function keepDigits(s: string, max = 6) {
+  return s.replace(/\D/g, "").slice(0, max);
+}
+
 export function SecurityPanel() {
   const router = useRouter();
   const [show, setShow] = useState(false);
@@ -33,19 +37,23 @@ export function SecurityPanel() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setErr(null);
-    if (newP.length < 8) {
-      setErr("Mật khẩu mới tối thiểu 8 ký tự");
+    if (!/^\d{6}$/.test(oldP)) {
+      setErr("Mã PIN hiện tại phải là 6 chữ số");
+      return;
+    }
+    if (!/^\d{6}$/.test(newP)) {
+      setErr("Mã PIN mới phải là 6 chữ số");
       return;
     }
     if (newP !== newP2) {
-      setErr("Xác nhận mật khẩu không khớp");
+      setErr("Xác nhận mã PIN không khớp");
       return;
     }
     setBusy(true);
     try {
       const res = await fetchJSON<{ new_recovery_key: string }>(
-        "/api/v1/ui/change-passphrase",
-        { json: { old_passphrase: oldP, new_passphrase: newP } }
+        "/api/v1/ui/change-pin",
+        { json: { old_pin: oldP, new_pin: newP } }
       );
       setNewRecovery(res.new_recovery_key);
       setOldP("");
@@ -64,7 +72,7 @@ export function SecurityPanel() {
         <h2 className="font-semibold mb-2">🔐 Bảo mật</h2>
         <RecoveryKeyPanel
           recoveryKey={newRecovery}
-          label="Đã đổi mật khẩu. Khoá khôi phục MỚI"
+          label="Đã đổi mã PIN. Khoá khôi phục MỚI"
           onContinue={() => {
             setNewRecovery(null);
             setShow(false);
@@ -83,49 +91,61 @@ export function SecurityPanel() {
           onClick={() => setShow((s) => !s)}
           className="btn btn-ghost"
         >
-          {show ? "Đóng" : "Đổi mật khẩu"}
+          {show ? "Đóng" : "Đổi mã PIN"}
         </button>
       </div>
       {show && (
         <form onSubmit={submit} className="flex flex-col gap-2 mt-3">
           <p className="muted text-xs">
-            Đổi mật khẩu sẽ <strong>rotate khoá khôi phục</strong> và logout
+            Đổi mã PIN sẽ <strong>rotate khoá khôi phục</strong> và logout
             tất cả thiết bị khác. Khoá cũ sẽ không còn tác dụng.
           </p>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="muted">Mật khẩu hiện tại</span>
+            <span className="muted">Mã PIN hiện tại</span>
             <input
               type="password"
-              className="field"
+              inputMode="numeric"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              autoComplete="current-password"
+              className="field font-mono tracking-[0.4em] text-center"
               value={oldP}
-              onChange={(e) => setOldP(e.target.value)}
+              onChange={(e) => setOldP(keepDigits(e.target.value))}
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="muted">Mật khẩu mới (≥ 8 ký tự)</span>
+            <span className="muted">Mã PIN mới (6 chữ số)</span>
             <input
               type="password"
-              className="field"
+              inputMode="numeric"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              autoComplete="new-password"
+              className="field font-mono tracking-[0.4em] text-center"
               value={newP}
-              onChange={(e) => setNewP(e.target.value)}
+              onChange={(e) => setNewP(keepDigits(e.target.value))}
             />
           </label>
           <label className="flex flex-col gap-1 text-sm">
-            <span className="muted">Nhập lại mật khẩu mới</span>
+            <span className="muted">Nhập lại mã PIN mới</span>
             <input
               type="password"
-              className="field"
+              inputMode="numeric"
+              pattern="[0-9]{6}"
+              maxLength={6}
+              autoComplete="new-password"
+              className="field font-mono tracking-[0.4em] text-center"
               value={newP2}
-              onChange={(e) => setNewP2(e.target.value)}
+              onChange={(e) => setNewP2(keepDigits(e.target.value))}
             />
           </label>
           {err && <div className="neg text-sm">{err}</div>}
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy || oldP.length !== 6 || newP.length !== 6 || newP2.length !== 6}
             className="btn btn-grd-primary self-start"
           >
-            {busy ? "…" : "Đổi mật khẩu"}
+            {busy ? "…" : "Đổi mã PIN"}
           </button>
         </form>
       )}

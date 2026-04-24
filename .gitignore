@@ -32,8 +32,9 @@ logs/
 # =============================================================================
 # LLM artifacts
 # =============================================================================
-# Ollama models downloaded locally (if any outside volume)
-models/
+# Ollama model weights downloaded locally (if any outside volume). Anchored
+# to repo root so it doesn't swallow Python packages named `models/`.
+/models/
 *.gguf
 *.safetensors
 llm-cache/

@@ -2,11 +2,11 @@
 
 Public endpoints (no auth required). Provides:
 - Status probe for middleware
-- First-time setup (passphrase + one-time recovery key)
+- First-time setup (PIN + one-time recovery key)
 - Unlock (create session)
 - Logout (delete session)
-- Change passphrase (requires current passphrase)
-- Recover (reset passphrase via recovery key)
+- Change PIN (requires current PIN)
+- Recover (reset PIN via recovery key)
 
 Session is a httponly SameSite=Strict cookie `mt_session`. API data endpoints
 are NOT gated — this is a UI convenience lock per single-user threat model.
@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..config import get_settings
 from ..db import get_session
 from ..schemas.ui_unlock import (
-    ChangePassphraseRequest,
-    ChangePassphraseResponse,
+    ChangePinRequest,
+    ChangePinResponse,
     RecoverRequest,
     RecoverResponse,
     SetupRequest,
@@ -28,6 +28,7 @@ from ..schemas.ui_unlock import (
     UnlockResponse,
     UnlockStatus,
 )
+from ..services.ui_passkey import count_passkeys
 from ..services.ui_unlock import (
     SESSION_SECONDS,
     create_session,
@@ -38,9 +39,9 @@ from ..services.ui_unlock import (
     record_failure,
     remaining_attempts,
     reset_attempts,
-    rotate_passphrase,
+    rotate_pin,
     setup_credential,
-    verify_passphrase,
+    verify_pin,
     verify_recovery_key,
     verify_session,
 )
@@ -75,7 +76,12 @@ async def status(
     unlocked = False
     if cred and mt_session:
         unlocked = (await verify_session(session, mt_session)) is not None
-    return UnlockStatus(configured=cred is not None, unlocked=unlocked)
+    pk_count = await count_passkeys(session)
+    return UnlockStatus(
+        configured=cred is not None,
+        unlocked=unlocked,
+        passkey_count=pk_count,
+    )
 
 
 @router.post("/setup", response_model=SetupResponse, status_code=201)
@@ -87,7 +93,7 @@ async def setup(
 ):
     if await get_credential(session):
         raise HTTPException(409, "already configured")
-    result = await setup_credential(session, data.passphrase)
+    result = await setup_credential(session, data.pin)
     ua = request.headers.get("user-agent", "")
     s = await create_session(session, user_agent=ua)
     response.set_cookie(
@@ -114,10 +120,10 @@ async def unlock(
     cred = await get_credential(session)
     if not cred:
         raise HTTPException(409, "ui not configured; call /ui/setup first")
-    if not verify_passphrase(cred.passphrase_hash, data.passphrase):
+    if not verify_pin(cred.passphrase_hash, data.pin):
         record_failure(ip)
         raise HTTPException(
-            401, f"invalid passphrase (remaining attempts: {remaining_attempts(ip)})"
+            401, f"invalid PIN (remaining attempts: {remaining_attempts(ip)})"
         )
     reset_attempts(ip)
     await prune_expired_sessions(session)
@@ -143,9 +149,9 @@ async def logout(
     return None
 
 
-@router.post("/change-passphrase", response_model=ChangePassphraseResponse)
-async def change_passphrase_endpoint(
-    data: ChangePassphraseRequest,
+@router.post("/change-pin", response_model=ChangePinResponse)
+async def change_pin_endpoint(
+    data: ChangePinRequest,
     response: Response,
     request: Request,
     mt_session: str | None = Cookie(default=None),
@@ -154,12 +160,12 @@ async def change_passphrase_endpoint(
     cred = await get_credential(session)
     if not cred:
         raise HTTPException(409, "ui not configured")
-    # Require current session (so stranger with stolen passphrase can't rotate remotely)
+    # Require current session (so stranger with stolen PIN can't rotate remotely)
     if not mt_session or not await verify_session(session, mt_session):
-        raise HTTPException(401, "must be unlocked to change passphrase")
-    if not verify_passphrase(cred.passphrase_hash, data.old_passphrase):
-        raise HTTPException(401, "current passphrase mismatch")
-    new_recovery = await rotate_passphrase(session, cred, data.new_passphrase)
+        raise HTTPException(401, "must be unlocked to change PIN")
+    if not verify_pin(cred.passphrase_hash, data.old_pin):
+        raise HTTPException(401, "current PIN mismatch")
+    new_recovery = await rotate_pin(session, cred, data.new_pin)
     # Issue a fresh session (all old sessions including this one were wiped)
     ua = request.headers.get("user-agent", "")
     s = await create_session(session, user_agent=ua)
@@ -167,7 +173,7 @@ async def change_passphrase_endpoint(
         COOKIE_NAME, s.raw_token, max_age=SESSION_SECONDS, **_cookie_kwargs()
     )
     await session.commit()
-    return ChangePassphraseResponse(new_recovery_key=new_recovery)
+    return ChangePinResponse(new_recovery_key=new_recovery)
 
 
 @router.post("/recover", response_model=RecoverResponse)
@@ -181,7 +187,7 @@ async def recover(
     if locked(ip):
         raise HTTPException(
             429,
-            f"too many failed recovery attempts from this IP; wait 15 minutes",
+            "too many failed recovery attempts from this IP; wait 15 minutes",
         )
     cred = await get_credential(session)
     if not cred:
@@ -192,7 +198,7 @@ async def recover(
             401, f"invalid recovery key (remaining attempts: {remaining_attempts(ip)})"
         )
     reset_attempts(ip)
-    new_recovery = await rotate_passphrase(session, cred, data.new_passphrase)
+    new_recovery = await rotate_pin(session, cred, data.new_pin)
     ua = request.headers.get("user-agent", "")
     s = await create_session(session, user_agent=ua)
     response.set_cookie(

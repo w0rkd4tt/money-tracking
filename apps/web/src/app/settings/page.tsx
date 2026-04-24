@@ -1,6 +1,8 @@
 import { api } from "@/lib/api";
 import { BackupPanel } from "@/components/settings/BackupPanel";
 import { GmailPanel } from "@/components/settings/GmailPanel";
+import { HotkeyPanel } from "@/components/settings/HotkeyPanel";
+import { PasskeyPanel } from "@/components/settings/PasskeyPanel";
 import { SecurityPanel } from "@/components/settings/SecurityPanel";
 
 type Policy = {
@@ -35,6 +37,10 @@ export default async function SettingsPage() {
       <h1 className="text-xl font-bold">Settings</h1>
 
       <SecurityPanel />
+
+      <PasskeyPanel />
+
+      <HotkeyPanel />
 
       <GmailPanel />
 

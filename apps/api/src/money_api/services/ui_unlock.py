@@ -2,14 +2,20 @@
 
 Model:
 - Single user. One row in `ui_credential` with passphrase_hash + recovery_key_hash.
-- On web session start the user types a passphrase → `/ui/unlock` issues a session
-  cookie `mt_session` (httponly, SameSite=Strict). Web middleware redirects based on
-  cookie presence + `/ui/status`.
-- The **API itself is not gated**. The gate protects only the web UI. This matches
-  the single-user local-first threat model: we only care about "someone else opens
-  my already-running browser".
-- If the passphrase is forgotten, a recovery key (shown ONCE at setup or rotation)
-  can reset the passphrase. DB data is plaintext so backups still restore cleanly.
+  (Column is historically named `passphrase_hash`; it now stores the argon2id
+  hash of a 6-digit PIN. Not renamed to avoid a migration — internal detail.)
+- On web session start the user types a 6-digit PIN → `/ui/unlock` issues a
+  session cookie `mt_session` (httponly, SameSite=Strict). Web middleware
+  redirects based on cookie presence + `/ui/status`.
+- The **API itself is not gated**. The gate protects only the web UI. This
+  matches the single-user local-first threat model: we only care about
+  "someone else opens my already-running browser".
+- If the PIN is forgotten, a recovery key (shown ONCE at setup or rotation)
+  can reset the PIN. DB data is plaintext so backups still restore cleanly.
+- PIN keyspace is only 10^6, so security relies on the 5-attempts-per-15-min
+  rate limiter + a bumped argon2 time_cost. For higher assurance, wire
+  WebAuthn/passkey later (design anchor: add a second column
+  `credential_type` + generic blob to support both PIN and passkey creds).
 """
 
 from __future__ import annotations
@@ -31,14 +37,17 @@ from ..models import UiCredential, UiSession
 SESSION_DAYS = 30
 SESSION_SECONDS = SESSION_DAYS * 24 * 3600
 
-_ph = PasswordHasher()
+# time_cost bumped above argon2-cffi's default (3) to slow brute force against
+# the tiny 10^6 PIN keyspace. Memory_cost at 64 MiB is standard; parallelism 1
+# because we only ever verify a handful of PINs on a single process.
+_ph = PasswordHasher(time_cost=4, memory_cost=65536, parallelism=1)
 
 
-def hash_passphrase(raw: str) -> str:
+def hash_pin(raw: str) -> str:
     return _ph.hash(raw)
 
 
-def verify_passphrase(hashed: str, raw: str) -> bool:
+def verify_pin(hashed: str, raw: str) -> bool:
     try:
         _ph.verify(hashed, raw)
         return True
@@ -89,10 +98,10 @@ class SetupResult:
     recovery_key: str
 
 
-async def setup_credential(session: AsyncSession, passphrase: str) -> SetupResult:
+async def setup_credential(session: AsyncSession, pin: str) -> SetupResult:
     recovery = _new_recovery_key()
     cred = UiCredential(
-        passphrase_hash=hash_passphrase(passphrase),
+        passphrase_hash=hash_pin(pin),
         recovery_key_hash=_sha256(_normalize_recovery_key(recovery)),
     )
     session.add(cred)
@@ -100,14 +109,14 @@ async def setup_credential(session: AsyncSession, passphrase: str) -> SetupResul
     return SetupResult(credential=cred, recovery_key=recovery)
 
 
-async def rotate_passphrase(
-    session: AsyncSession, cred: UiCredential, new_passphrase: str
+async def rotate_pin(
+    session: AsyncSession, cred: UiCredential, new_pin: str
 ) -> str:
-    """Change passphrase and rotate recovery key. Returns new recovery key.
+    """Change PIN and rotate recovery key. Returns new recovery key.
     Invalidates ALL existing sessions.
     """
     new_recovery = _new_recovery_key()
-    cred.passphrase_hash = hash_passphrase(new_passphrase)
+    cred.passphrase_hash = hash_pin(new_pin)
     cred.recovery_key_hash = _sha256(_normalize_recovery_key(new_recovery))
     await session.execute(delete(UiSession))
     return new_recovery

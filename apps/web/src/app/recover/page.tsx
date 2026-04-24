@@ -17,10 +17,10 @@ export default async function RecoverPage() {
   return (
     <div className="max-w-md mx-auto flex flex-col gap-4 py-8">
       <div>
-        <h1 className="text-2xl font-bold">🆘 Khôi phục mật khẩu</h1>
+        <h1 className="text-2xl font-bold">🆘 Khôi phục mã PIN</h1>
         <p className="muted text-sm mt-1">
           Nhập khoá khôi phục (dạng <code>XXXX-XXXX-...</code>) bạn đã lưu lúc
-          thiết lập để đặt mật khẩu mới.
+          thiết lập để đặt mã PIN mới.
         </p>
       </div>
       <RecoverForm />

@@ -24,6 +24,7 @@ from .routers import (
     settings as settings_router,
     transactions,
     transfers,
+    ui_passkey,
     ui_unlock,
 )
 from .schedulers.jobs import start_scheduler, stop_scheduler
@@ -65,6 +66,7 @@ app.add_middleware(
 API = "/api/v1"
 app.include_router(health.router, prefix=API)
 app.include_router(ui_unlock.router, prefix=API)
+app.include_router(ui_passkey.router, prefix=API)
 app.include_router(accounts.router, prefix=API)
 app.include_router(categories.router, prefix=API)
 app.include_router(transactions.router, prefix=API)

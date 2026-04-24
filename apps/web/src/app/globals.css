@@ -343,3 +343,26 @@ body {
 *::-webkit-scrollbar-thumb:hover {
   background: var(--border-strong);
 }
+
+/* ==== Auto-scale on tall displays ====
+ * Scoped to <main> only. Applying `zoom` to `html` breaks layout using
+ * viewport units (vh/dvh/svh) — `h-screen` becomes physically 1.1× the
+ * visual viewport and pushes sticky content below the fold. The sidebar is
+ * a fixed-width chrome anyway; we only need the *content* area to scale up
+ * on big monitors where the default feels tiny.
+ *
+ * Thresholds chosen to match common monitor heights:
+ *   < 1000px   → 1.00   (laptops, standard 1080p landscape)
+ *   1000–1399  → 1.10   (1440p, 27" iMac)
+ *   1400–1799  → 1.20   (4K landscape, portrait 2K)
+ *   ≥ 1800     → 1.30   (Pro Display XDR, portrait 4K)
+ */
+@media (min-height: 1000px) {
+  main { zoom: 1.1; }
+}
+@media (min-height: 1400px) {
+  main { zoom: 1.2; }
+}
+@media (min-height: 1800px) {
+  main { zoom: 1.3; }
+}
