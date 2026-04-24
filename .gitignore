@@ -86,6 +86,7 @@ next-env.d.ts
 !.vscode/extensions.json
 !.vscode/settings.shared.json
 .idea/
+.claude/
 .claude/settings.local.json
 *.swp
 *.swo
