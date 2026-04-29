@@ -1,12 +1,14 @@
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import and_, asc, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import Transaction
+from ..models import Account, Category, Transaction, TransferGroup
 from ..schemas.common import PaginatedResponse
 from ..schemas.transaction import (
     TransactionCreate,
@@ -170,3 +172,107 @@ async def delete_tx(tx_id: int, session: AsyncSession = Depends(get_session)):
     await session.delete(tx)
     await session.commit()
     return None
+
+
+class LinkCreditPaymentRequest(BaseModel):
+    credit_account_id: int
+
+
+class LinkCreditPaymentResponse(BaseModel):
+    transfer_group_id: int
+    source_tx_id: int
+    credit_leg_tx_id: int
+
+
+@router.post("/{tx_id}/link-credit-payment", response_model=LinkCreditPaymentResponse)
+async def link_credit_payment(
+    tx_id: int,
+    data: LinkCreditPaymentRequest,
+    session: AsyncSession = Depends(get_session),
+):
+    """Convert a single-leg credit-card-payment tx into a proper transfer pair.
+
+    Use case: a Timo "vừa giảm 4M, Mô tả: Tra no tin dung HSBC" arrives. The
+    poller records -4M on Timo (kind=expense, category="Thanh toán thẻ TD").
+    The HSBC side won't appear in our DB until HSBC's own email arrives
+    days later — meanwhile HSBC's debt display stays stale.
+
+    This endpoint lets the user bind the source tx to a credit account NOW:
+      1. Creates a TransferGroup (Timo → HSBC, amount=4M)
+      2. Source tx kind flips expense → transfer; transfer_group_id set
+      3. Sibling +4M income tx created on the credit account, status=
+         confirmed, source=`manual:cc-payment`, also in the same group
+
+    Result: HSBC debt drops by 4M immediately. When HSBC's confirming email
+    finally arrives, the gmail poller will detect the matching TransferGroup
+    leg and skip duplicating.
+    """
+    source = await session.get(Transaction, tx_id)
+    if source is None:
+        raise HTTPException(404, "source transaction not found")
+    if source.transfer_group_id is not None:
+        raise HTTPException(409, "tx is already part of a transfer group")
+    if source.amount >= 0:
+        raise HTTPException(
+            400, "expected an outgoing (negative) tx for a credit-card payment"
+        )
+
+    credit_acct = await session.get(Account, data.credit_account_id)
+    if credit_acct is None:
+        raise HTTPException(404, "credit account not found")
+    if credit_acct.type != "credit":
+        raise HTTPException(
+            400, f"account '{credit_acct.name}' is not a credit account"
+        )
+    if credit_acct.id == source.account_id:
+        raise HTTPException(400, "destination must differ from source account")
+
+    abs_amount: Decimal = -source.amount  # positive magnitude
+
+    # Build the transfer group.
+    group = TransferGroup(
+        ts=source.ts,
+        from_account_id=source.account_id,
+        to_account_id=credit_acct.id,
+        amount=abs_amount,
+        currency=source.currency,
+        note="Credit-card payment (linked from email-ingested tx)",
+        source="manual:cc-payment",
+    )
+    session.add(group)
+    await session.flush()
+
+    # Promote source tx into the transfer (Transaction has no `kind` column —
+    # transfer-ness is implied by `transfer_group_id` being set).
+    source.transfer_group_id = group.id
+
+    # Resolve "Thanh toán thẻ TD" category for the credit-leg (income on the
+    # credit account = debt reduction). Falls back to source's category.
+    pay_cat = (
+        await session.execute(
+            select(Category).where(Category.path.ilike("%Thanh toán thẻ TD%")).limit(1)
+        )
+    ).scalar_one_or_none()
+    leg_category_id = pay_cat.id if pay_cat else source.category_id
+
+    leg = Transaction(
+        ts=source.ts,
+        amount=abs_amount,  # POSITIVE on credit account → reduces debt
+        currency=source.currency,
+        account_id=credit_acct.id,
+        category_id=leg_category_id,
+        merchant_text=source.merchant_text,
+        note=f"Credit-card payment from acct #{source.account_id}",
+        source="manual:cc-payment",
+        confidence=1.0,
+        status="confirmed",
+        transfer_group_id=group.id,
+    )
+    session.add(leg)
+    await session.flush()
+    await session.commit()
+    return LinkCreditPaymentResponse(
+        transfer_group_id=group.id,
+        source_tx_id=source.id,
+        credit_leg_tx_id=leg.id,
+    )

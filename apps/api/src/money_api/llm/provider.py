@@ -153,7 +153,11 @@ class OllamaProvider:
                 r.raise_for_status()
                 data = r.json()
         except httpx.HTTPError as e:
-            raise LLMUnavailable(f"Ollama unavailable: {e}") from e
+            # `httpx.HTTPError.__str__` is sometimes empty (e.g. ConnectTimeout).
+            # Surface the exception class so the warning log is actionable.
+            cls = type(e).__name__
+            detail = str(e) or repr(e)
+            raise LLMUnavailable(f"{cls}: {detail}") from e
 
         content = _extract_content(data)
         if schema is not None:

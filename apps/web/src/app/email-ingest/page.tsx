@@ -37,18 +37,30 @@ type Stats = {
   rule_count: number;
 };
 
+type Account = {
+  id: number;
+  name: string;
+  type: string;
+  archived: boolean;
+};
+
 export default async function EmailIngestPage() {
-  const [items, stats, categories] = await Promise.all([
+  const [items, stats, categories, accounts] = await Promise.all([
     api<IngestedItem[]>("/gmail/ingested?limit=200"),
     api<Stats>("/gmail/ingest-stats"),
     api<Category[]>("/categories"),
+    api<Account[]>("/accounts"),
   ]);
+  const creditAccounts = accounts.filter(
+    (a) => a.type === "credit" && !a.archived,
+  );
 
   return (
     <EmailIngestDashboard
       initialItems={items}
       initialStats={stats}
       categories={categories}
+      creditAccounts={creditAccounts}
     />
   );
 }

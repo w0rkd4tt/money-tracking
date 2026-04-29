@@ -9,6 +9,76 @@
 
 Toàn bộ dữ liệu lưu trên máy (SQLite), không gửi raw ra cloud.
 
+## Kiến trúc
+
+### Container & data flow
+
+```mermaid
+flowchart LR
+    User((User))
+    Tg[Telegram app]
+    GmailApi[Google Gmail API<br/>readonly + modify]
+    Cloud[(DeepSeek<br/>opt-in fallback)]
+
+    subgraph Compose[docker compose]
+        Web["Next.js 14<br/>web UI :3000<br/>(PIN + passkey gate)"]
+        Api["FastAPI<br/>api/v1 :8000"]
+        Bot["Telegram bot<br/>polling 5s"]
+        Gmail["Gmail poller<br/>cron 8h + 20h"]
+        DB[("Postgres 16")]
+        Backups[("./backups<br/>daily pg_dump")]
+    end
+
+    subgraph Host[Host machine — outside compose]
+        Ollama[("Ollama native<br/>Metal / CUDA<br/>llama3.1:8b")]
+    end
+
+    User -->|PIN / Touch ID| Web
+    User -.->|chat| Tg
+    Tg --> Bot
+
+    Web <-->|cookie mt_session| Api
+    Bot --> Api
+    Gmail --> Api
+    Api <--> DB
+    DB --> Backups
+
+    Api --> Ollama
+    Api -.-> Cloud
+    Gmail --> GmailApi
+```
+
+Ollama nằm **ngoài** compose cố ý để dùng Metal/CUDA GPU của host. Các service trong compose gọi ra `host.docker.internal:11434`.
+
+### Luồng ingest giao dịch
+
+```mermaid
+flowchart TD
+    A[Chat text<br/>hoặc email body]
+    B{Rule engine<br/>regex theo sender/subject}
+    C[LLM extract<br/>JSON schema ép structured output]
+    D[ParsedTx<br/>amount, kind, merchant, ts, category?]
+    E{Category resolver<br/>5-step match ladder}
+    F[Pending tx<br/>status=pending]
+    G[User review<br/>/email-ingest hoặc /chat]
+    H[Confirmed tx]
+    I[Dashboard + budget alerts<br/>+ monthly plan tracking]
+
+    A --> B
+    B -- match rule --> D
+    B -- miss --> C
+    C --> D
+    D --> E
+    E -- leaf+kind, fuzzy, path --> F
+    E -- không match --> F
+    F --> G
+    G -->|confirm| H
+    G -->|reject| X((bỏ))
+    H --> I
+```
+
+Confidence thấp hoặc JSON invalid → retry temperature=0, vẫn fail → cloud fallback (nếu `LLM_ALLOW_CLOUD=true`).
+
 ## Quick start
 
 ```bash
@@ -113,4 +183,6 @@ Xem thêm chiến lược routing + fallback cloud: [docs/06-llm-strategy.md](./
 
 ## Trạng thái
 
-Dự án đang ở giai đoạn thiết kế. Chưa có code.
+Đã có bản chạy được. Các mảng chính (backend API + web UI + Telegram bot +
+Gmail poller + UI lock với PIN/passkey + dashboard + monthly plan) hoạt động.
+Roadmap tính năng thêm xem [docs/12-roadmap.md](./docs/12-roadmap.md).

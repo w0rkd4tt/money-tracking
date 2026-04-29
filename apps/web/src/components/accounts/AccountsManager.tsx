@@ -260,28 +260,44 @@ function AccountForm({
   );
 }
 
+type BucketRef = { name: string; icon: string | null; color: string | null };
+
 export function AccountsManager({
   initialAccounts,
   initialBalances,
+  bucketByAccount = {},
 }: {
   initialAccounts: Account[];
   initialBalances: Balance[];
+  bucketByAccount?: Record<number, BucketRef>;
 }) {
   const [accounts, setAccounts] = useState<Account[]>(initialAccounts);
   const [balances, setBalances] = useState<Balance[]>(initialBalances);
+  const [bucketMap, setBucketMap] =
+    useState<Record<number, BucketRef>>(bucketByAccount);
   const [creating, setCreating] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [showArchived, setShowArchived] = useState(false);
 
   const refresh = useCallback(async () => {
-    const [a, b] = await Promise.all([
+    const [a, b, buckets] = await Promise.all([
       fetchJSON<Account[]>(
         "/api/v1/accounts" + (showArchived ? "?include_archived=true" : "")
       ),
       fetchJSON<Balance[]>("/api/v1/accounts/balance"),
+      fetchJSON<
+        { id: number; name: string; icon: string | null; color: string | null; account_ids: number[] }[]
+      >("/api/v1/buckets"),
     ]);
     setAccounts(a);
     setBalances(b);
+    const next: Record<number, BucketRef> = {};
+    for (const bk of buckets) {
+      for (const aid of bk.account_ids) {
+        next[aid] = { name: bk.name, icon: bk.icon, color: bk.color };
+      }
+    }
+    setBucketMap(next);
   }, [showArchived]);
 
   useEffect(() => {
@@ -433,10 +449,27 @@ export function AccountsManager({
                         <div className="muted text-xs uppercase tracking-wide mt-0.5">
                           {a.type}
                         </div>
-                        {(a.is_default || a.archived) && (
-                          <div className="flex gap-1 mt-1.5">
+                        {(a.is_default || a.archived || bucketMap[a.id]) && (
+                          <div className="flex gap-1 mt-1.5 flex-wrap">
                             {a.is_default && (
                               <span className="chip chip-primary">mặc định</span>
+                            )}
+                            {bucketMap[a.id] && (
+                              <span
+                                className="chip"
+                                style={{
+                                  background: bucketMap[a.id].color
+                                    ? `${bucketMap[a.id].color}22`
+                                    : undefined,
+                                  color: bucketMap[a.id].color || undefined,
+                                  border: bucketMap[a.id].color
+                                    ? `1px solid ${bucketMap[a.id].color}55`
+                                    : undefined,
+                                }}
+                                title={`Bucket: ${bucketMap[a.id].name}`}
+                              >
+                                {bucketMap[a.id].icon || "📦"} {bucketMap[a.id].name}
+                              </span>
                             )}
                             {a.archived && (
                               <span className="chip chip-muted">đã lưu trữ</span>
@@ -477,17 +510,32 @@ export function AccountsManager({
                   </div>
                   {a.type === "credit" ? (
                     <>
-                      <div className="mt-3">
-                        <div className="muted text-xs uppercase">Dư nợ</div>
-                        <div
-                          className={
-                            "text-xl font-mono " +
-                            (Number(bal?.debt || 0) > 0 ? "neg" : "pos")
-                          }
-                        >
-                          {fmtVND(bal?.debt || "0")}
-                        </div>
-                      </div>
+                      {(() => {
+                        // Credit accounts go negative as you spend, positive
+                        // when you over-pay. Show whichever side is non-zero
+                        // so a 0-debt-but-positive-balance account isn't
+                        // ambiguously labelled "Dư nợ: 0đ".
+                        const balNum = Number(bal?.balance || 0);
+                        const debtNum = Number(bal?.debt || 0);
+                        const hasSurplus = balNum > 0;
+                        const label = hasSurplus ? "Dư có (đã thanh toán dư)" : "Dư nợ";
+                        const value = hasSurplus
+                          ? String(balNum)
+                          : (bal?.debt || "0");
+                        return (
+                          <div className="mt-3">
+                            <div className="muted text-xs uppercase">{label}</div>
+                            <div
+                              className={
+                                "text-xl font-mono " +
+                                (hasSurplus ? "pos" : debtNum > 0 ? "neg" : "muted")
+                              }
+                            >
+                              {fmtVND(value)}
+                            </div>
+                          </div>
+                        );
+                      })()}
                       {bal?.credit_limit ? (
                         <>
                           <div className="flex justify-between text-xs muted mt-2">

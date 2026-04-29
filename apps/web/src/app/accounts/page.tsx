@@ -27,11 +27,35 @@ type Balance = {
   utilization_pct: number | null;
 };
 
+type Bucket = {
+  id: number;
+  name: string;
+  icon: string | null;
+  color: string | null;
+  account_ids: number[];
+};
+
 export default async function AccountsPage() {
-  const [accounts, balances] = await Promise.all([
+  const [accounts, balances, buckets] = await Promise.all([
     api<Account[]>("/accounts?include_archived=true"),
     api<Balance[]>("/accounts/balance"),
+    api<Bucket[]>("/buckets"),
   ]);
 
-  return <AccountsManager initialAccounts={accounts} initialBalances={balances} />;
+  // Pre-compute account_id → bucket so the client component just looks it up.
+  const accountToBucket = new Map<number, { name: string; icon: string | null; color: string | null }>();
+  for (const b of buckets) {
+    for (const aid of b.account_ids) {
+      accountToBucket.set(aid, { name: b.name, icon: b.icon, color: b.color });
+    }
+  }
+  const bucketByAccount = Object.fromEntries(accountToBucket.entries());
+
+  return (
+    <AccountsManager
+      initialAccounts={accounts}
+      initialBalances={balances}
+      bucketByAccount={bucketByAccount}
+    />
+  );
 }

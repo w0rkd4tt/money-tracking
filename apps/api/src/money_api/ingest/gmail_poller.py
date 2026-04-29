@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
 from ..models import Account, Category, SyncState, Transaction
-from .gmail_llm import llm_extract_from_email
+from .gmail_llm import llm_classify_email_category, llm_extract_from_email
 from .gmail_oauth import load_credentials
 from .gmail_parser import ParsedTx, parse_email, raw_email_from_gmail
 
@@ -206,10 +206,21 @@ async def _resolve_category_for(
 
 
 async def _dedup_exists(session: AsyncSession, message_id: str) -> bool:
-    # Source column can be 'gmail' (legacy) or 'gmail:<rule>' (new). Match prefix.
+    """Check whether this Gmail message has an *active* (non-rejected) tx.
+
+    Rejected tx are intentionally excluded so the user can re-parse: reject
+    something that was wrong, mark the email unread on Gmail, and the next
+    sync will create a fresh pending row instead of silently skipping. The
+    old rejected row stays for audit; user can delete it manually if they
+    want a clean history.
+
+    Source column can be 'gmail' (legacy) or 'gmail:<rule>' (new). Match
+    prefix.
+    """
     q = select(Transaction.id).where(
         Transaction.source.startswith("gmail"),
         Transaction.raw_ref == message_id,
+        Transaction.status != "rejected",
     )
     row = (await session.execute(q.limit(1))).first()
     return row is not None
@@ -254,6 +265,37 @@ async def ingest_parsed(
         session, parsed.kind, parsed_category=parsed.category
     )
 
+    # Credit-card payment dedup: if the user already linked a Timo→HSBC
+    # transfer (via /transactions/{id}/link-credit-payment), the credit-leg
+    # tx already exists with status=confirmed. When HSBC's confirming email
+    # arrives days later, we'd otherwise insert a duplicate +amount row.
+    # Detect by (account, amount, ts ±3 days) and skip — caller marks email
+    # as read so we don't keep re-checking.
+    if parsed.kind == "income" and acct.type == "credit":
+        from datetime import timedelta as _td
+        ts = parsed.ts or datetime.now()
+        existing_leg = (
+            await session.execute(
+                select(Transaction.id)
+                .where(
+                    Transaction.account_id == acct.id,
+                    Transaction.amount == parsed.amount,
+                    Transaction.ts.between(ts - _td(days=3), ts + _td(days=3)),
+                    Transaction.transfer_group_id.isnot(None),
+                    Transaction.status == "confirmed",
+                )
+                .limit(1)
+            )
+        ).first()
+        if existing_leg is not None:
+            log.info(
+                "skipping credit-leg dedup for %s — already accounted for "
+                "via transfer leg tx#%s",
+                message_id,
+                existing_leg[0],
+            )
+            return None
+
     # Sign convention per account type:
     #   Regular accounts (cash/bank/ewallet/saving):
     #     expense → negative (balance down)
@@ -283,6 +325,40 @@ async def ingest_parsed(
         if not n.lower().startswith("[llm]") and "thông báo" not in n.lower():
             note_val = n[:200]
 
+    source = _source_for(parsed.rule_name)
+
+    # If the user previously rejected a parse for this email, recycle that
+    # row instead of inserting a new one. The unique (source, raw_ref) DB
+    # constraint would otherwise fail. App-level dedup ignores rejected so
+    # we only get here when the user genuinely wants a fresh parse.
+    # Match by raw_ref + gmail-prefix (source may have flipped between runs,
+    # e.g. previously gmail:llm-fallback because the rule missed, now
+    # gmail:timo because we relaxed the rule subject filter). Only one
+    # rejected row per email is expected.
+    rejected_tx = (
+        await session.execute(
+            select(Transaction).where(
+                Transaction.raw_ref == message_id,
+                Transaction.source.startswith("gmail"),
+                Transaction.status == "rejected",
+            )
+        )
+    ).scalar_one_or_none()
+    if rejected_tx is not None:
+        rejected_tx.ts = parsed.ts or datetime.now()
+        rejected_tx.amount = signed
+        rejected_tx.currency = parsed.currency
+        rejected_tx.account_id = acct.id
+        rejected_tx.category_id = category_id
+        rejected_tx.merchant_text = parsed.merchant
+        rejected_tx.note = note_val
+        rejected_tx.source = source
+        rejected_tx.confidence = parsed.confidence
+        rejected_tx.status = "pending"
+        rejected_tx.llm_tags = {"rule": parsed.rule_name, "extra": parsed.extra}
+        await session.flush()
+        return rejected_tx
+
     tx = Transaction(
         ts=parsed.ts or datetime.now(),
         amount=signed,
@@ -291,7 +367,7 @@ async def ingest_parsed(
         category_id=category_id,
         merchant_text=parsed.merchant,
         note=note_val,
-        source=_source_for(parsed.rule_name),
+        source=source,
         raw_ref=message_id,
         confidence=parsed.confidence,
         status="pending",
@@ -405,6 +481,33 @@ async def poll_once(
                     # Still no match → leave unread so user can review / add rule
                     result.skipped += 1
                     continue
+
+                # Rule extracted but didn't pick a category (most bank emails
+                # land here — rule knows amount/account/ts but not whether
+                # the merchant is "Ăn uống" or "Đi lại"). Run a focused LLM
+                # classify on the body so the resolver has something better
+                # than "Chưa phân loại" to map.
+                if (
+                    parsed.rule_name != "llm-fallback"
+                    and (parsed.category is None or parsed.category == "Chưa phân loại")
+                    and llm_fallback_enabled
+                    and len(raw.body_text or "") <= llm_max_body
+                ):
+                    classified = await llm_classify_email_category(
+                        session,
+                        raw,
+                        merchant=parsed.merchant,
+                        amount=int(parsed.amount),
+                        kind=parsed.kind,
+                    )
+                    if classified:
+                        log.info(
+                            "LLM classify category for %s: %s (rule=%s)",
+                            mid,
+                            classified,
+                            parsed.rule_name,
+                        )
+                        parsed.category = classified
                 tx = await ingest_parsed(session, parsed, mid)
                 mark = False
                 if tx is not None:
@@ -413,17 +516,17 @@ async def poll_once(
                 else:
                     # ingest_parsed returned None: either dedup (already exists
                     # with this raw_ref) or account-hint did not resolve.
-                    # Mark read only if an entry with this message_id already
-                    # exists (dedup) — so re-marked-unread emails don't loop.
-                    # NB: `source` is now of the form "gmail:<rule>" (e.g.
-                    # "gmail:llm-fallback"), not the bare "gmail". Use prefix
-                    # match to catch all variants — matches `_dedup_exists`.
+                    # Mark read only if an *active* entry exists (dedup) —
+                    # rejected tx don't count, so a user re-marking an email
+                    # unread to retry a previously-failed parse won't be
+                    # immediately re-flagged read.
                     existing = (
                         await session.execute(
                             select(Transaction.id)
                             .where(
                                 Transaction.source.startswith("gmail"),
                                 Transaction.raw_ref == mid,
+                                Transaction.status != "rejected",
                             )
                             .limit(1)
                         )

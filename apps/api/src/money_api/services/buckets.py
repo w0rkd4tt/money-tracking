@@ -1,13 +1,22 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models import AllocationBucket, BucketCategory
+from ..models import AllocationBucket, BucketAccount, BucketCategory
 
 
 async def category_ids_for(session: AsyncSession, bucket_id: int) -> list[int]:
     rows = (
         await session.execute(
             select(BucketCategory.category_id).where(BucketCategory.bucket_id == bucket_id)
+        )
+    ).all()
+    return [r[0] for r in rows]
+
+
+async def account_ids_for(session: AsyncSession, bucket_id: int) -> list[int]:
+    rows = (
+        await session.execute(
+            select(BucketAccount.account_id).where(BucketAccount.bucket_id == bucket_id)
         )
     ).all()
     return [r[0] for r in rows]
@@ -48,8 +57,44 @@ async def set_bucket_categories(
         )
 
 
+async def set_bucket_accounts(
+    session: AsyncSession, bucket_id: int, account_ids: list[int]
+) -> None:
+    """Replace the full account mapping for a bucket. Enforces 1 account → 1
+    bucket so spend calc never has to disambiguate."""
+    existing = {
+        r[0]
+        for r in (
+            await session.execute(
+                select(BucketAccount.account_id).where(BucketAccount.bucket_id == bucket_id)
+            )
+        ).all()
+    }
+    wanted = set(account_ids)
+    to_add = wanted - existing
+    to_del = existing - wanted
+
+    for aid in to_add:
+        await session.execute(
+            BucketAccount.__table__.delete().where(
+                BucketAccount.account_id == aid,
+                BucketAccount.bucket_id != bucket_id,
+            )
+        )
+        session.add(BucketAccount(bucket_id=bucket_id, account_id=aid))
+
+    if to_del:
+        await session.execute(
+            BucketAccount.__table__.delete().where(
+                BucketAccount.bucket_id == bucket_id,
+                BucketAccount.account_id.in_(to_del),
+            )
+        )
+
+
 async def bucket_out_dict(session: AsyncSession, bucket: AllocationBucket) -> dict:
     cats = await category_ids_for(session, bucket.id)
+    accs = await account_ids_for(session, bucket.id)
     return {
         "id": bucket.id,
         "name": bucket.name,
@@ -59,4 +104,5 @@ async def bucket_out_dict(session: AsyncSession, bucket: AllocationBucket) -> di
         "archived": bucket.archived,
         "note": bucket.note,
         "category_ids": cats,
+        "account_ids": accs,
     }

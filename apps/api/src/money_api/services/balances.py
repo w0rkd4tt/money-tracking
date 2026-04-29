@@ -36,12 +36,15 @@ async def compute_balances(session: AsyncSession) -> list[BalanceOut]:
         debt = None
         available = None
         util = None
-        if r.type == "credit" and r.credit_limit:
-            # Convention: credit account balance goes NEGATIVE as you spend; 0 after payoff.
-            # debt = positive magnitude owed.
+        if r.type == "credit":
+            # Convention: credit account balance goes NEGATIVE as you spend;
+            # 0 after payoff. `debt` is just the positive magnitude of that
+            # negative — works regardless of whether the user has filled in
+            # `credit_limit`. Without a limit we just can't compute the
+            # available/utilisation pair.
             debt = max(Decimal("0"), -balance)
-            available = r.credit_limit - debt
-            if r.credit_limit > 0:
+            if r.credit_limit and r.credit_limit > 0:
+                available = r.credit_limit - debt
                 util = float(debt / r.credit_limit * 100)
         out.append(
             BalanceOut(

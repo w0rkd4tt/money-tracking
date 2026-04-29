@@ -72,7 +72,16 @@ class Rule:
 def _match_glob(pattern: str, value: str) -> bool:
     # Minimal glob: * → .*
     regex = "^" + re.escape(pattern).replace(r"\*", ".*") + "$"
-    return re.match(regex, value, re.IGNORECASE) is not None
+    # `value` may be either a bare email ("support@timo.vn") or an RFC 5322
+    # display-name form ("Timo Support <support@timo.vn>"). Try both — if the
+    # full string doesn't match, extract the angle-bracketed email and retry,
+    # so glob patterns like "*@timo.vn" still match the display-name form.
+    if re.match(regex, value, re.IGNORECASE):
+        return True
+    angle_match = re.search(r"<([^>]+)>", value)
+    if angle_match and re.match(regex, angle_match.group(1), re.IGNORECASE):
+        return True
+    return False
 
 
 def _parse_amount(raw: str) -> Decimal | None:
@@ -156,7 +165,13 @@ def apply_rule(rule: Rule, email: RawEmail) -> ParsedTx | None:
     if rule.subject_any and not any(k.lower() in subj for k in rule.subject_any):
         return None
 
-    body = email.body_text
+    # Strip greeting + signature/marketing tail so merchant_patterns don't
+    # accidentally swallow "Cảm ơn... Trân trọng... Timo Digital Bank by
+    # BVBank" into merchant_text. Gmail often returns single-line bodies,
+    # so the merchant regex's `(.+?)$` terminator captures everything to
+    # end-of-body when chrome isn't stripped.
+    from ..llm.redact import strip_chrome  # avoids cycle at module load
+    body = strip_chrome(email.body_text)
     # Extract amount + capture leading sign if present in context
     amount: Decimal | None = None
     leading_sign: str | None = None
@@ -333,7 +348,12 @@ BUILTIN_RULES: list[Rule] = [
     Rule(
         name="Timo",
         sender_globs=["*@timo.vn", "*@bvbank.vn"],
-        subject_any=["thay doi so du", "thay đổi số dư", "bien dong", "biến động"],
+        # Drop subject filter — Timo's actual emails have wildly varying
+        # subjects ("Thông báo giao dịch", "Tài khoản giảm", "Spend Account
+        # ..."). Sender alone is reliable since Timo only sends transactional
+        # emails to its customers; OTPs/marketing already filtered by Gmail
+        # policy denylist.
+        subject_any=[],
         account_hint="Timo",
         amount_patterns=[
             r"v[ừu]a\s*(?:gi[ảa]m|t[ăa]ng)\s*([\d\.,]+)\s*VND",

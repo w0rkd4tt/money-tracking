@@ -3,9 +3,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import AllocationBucket, Category
+from ..models import Account, AllocationBucket, Category
 from ..schemas.bucket import BucketCreate, BucketOut, BucketUpdate
-from ..services.buckets import bucket_out_dict, set_bucket_categories
+from ..services.buckets import (
+    bucket_out_dict,
+    set_bucket_accounts,
+    set_bucket_categories,
+)
 
 router = APIRouter(prefix="/buckets", tags=["buckets"])
 
@@ -26,6 +30,16 @@ async def _validate_categories(session: AsyncSession, ids: list[int]) -> None:
         )
 
 
+async def _validate_accounts(session: AsyncSession, ids: list[int]) -> None:
+    if not ids:
+        return
+    rows = (await session.execute(select(Account).where(Account.id.in_(ids)))).scalars().all()
+    found = {a.id for a in rows}
+    missing = set(ids) - found
+    if missing:
+        raise HTTPException(400, f"account not found: {sorted(missing)}")
+
+
 @router.get("", response_model=list[BucketOut])
 async def list_buckets(
     include_archived: bool = False,
@@ -41,6 +55,7 @@ async def list_buckets(
 @router.post("", response_model=BucketOut, status_code=201)
 async def create_bucket(data: BucketCreate, session: AsyncSession = Depends(get_session)):
     await _validate_categories(session, data.category_ids)
+    await _validate_accounts(session, data.account_ids)
     b = AllocationBucket(
         name=data.name,
         icon=data.icon,
@@ -55,6 +70,7 @@ async def create_bucket(data: BucketCreate, session: AsyncSession = Depends(get_
         await session.rollback()
         raise HTTPException(409, f"duplicate bucket name: {e}") from e
     await set_bucket_categories(session, b.id, data.category_ids)
+    await set_bucket_accounts(session, b.id, data.account_ids)
     await session.commit()
     await session.refresh(b)
     return await bucket_out_dict(session, b)
@@ -79,11 +95,15 @@ async def update_bucket(
         raise HTTPException(404, "bucket not found")
     patch = data.model_dump(exclude_unset=True)
     category_ids = patch.pop("category_ids", None)
+    account_ids = patch.pop("account_ids", None)
     for k, v in patch.items():
         setattr(b, k, v)
     if category_ids is not None:
         await _validate_categories(session, category_ids)
         await set_bucket_categories(session, b.id, category_ids)
+    if account_ids is not None:
+        await _validate_accounts(session, account_ids)
+        await set_bucket_accounts(session, b.id, account_ids)
     await session.commit()
     await session.refresh(b)
     return await bucket_out_dict(session, b)

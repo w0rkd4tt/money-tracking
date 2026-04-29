@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import (
     AllocationBucket,
+    BucketAccount,
     BucketCategory,
     Category,
     MonthlyPlan,
@@ -39,7 +40,7 @@ def month_window(d: date) -> tuple[datetime, datetime]:
 
 
 async def actual_income(session: AsyncSession, month: date) -> Decimal:
-    """Sum of absolute amounts for confirmed transactions in month whose category is income."""
+    """Sum of absolute amounts for confirmed income tx (excluding transfers)."""
     start, end = month_window(month)
     q = (
         select(func.coalesce(func.sum(func.abs(Transaction.amount)), 0))
@@ -49,6 +50,7 @@ async def actual_income(session: AsyncSession, month: date) -> Decimal:
             Transaction.ts < end,
             Transaction.status == "confirmed",
             Category.kind == "income",
+            Transaction.transfer_group_id.is_(None),
         )
     )
     v = (await session.execute(q)).scalar_one() or 0
@@ -76,7 +78,8 @@ async def suggest_income(session: AsyncSession, month: date) -> tuple[Decimal, l
 
 
 async def spend_by_category(session: AsyncSession, month: date) -> dict[int, Decimal]:
-    """Map category_id → absolute spend in the month (expense categories only, confirmed tx)."""
+    """Map category_id → absolute spend in the month (expense categories only,
+    confirmed tx, excluding transfers between user's own accounts)."""
     start, end = month_window(month)
     q = (
         select(
@@ -89,6 +92,7 @@ async def spend_by_category(session: AsyncSession, month: date) -> dict[int, Dec
             Transaction.ts < end,
             Transaction.status == "confirmed",
             Category.kind == "expense",
+            Transaction.transfer_group_id.is_(None),
         )
         .group_by(Transaction.category_id)
     )
@@ -102,6 +106,63 @@ async def bucket_to_categories(session: AsyncSession) -> dict[int, list[int]]:
     for r in rows:
         out.setdefault(r.bucket_id, []).append(r.category_id)
     return out
+
+
+async def bucket_to_accounts(session: AsyncSession) -> dict[int, list[int]]:
+    rows = (await session.execute(select(BucketAccount))).scalars().all()
+    out: dict[int, list[int]] = {}
+    for r in rows:
+        out.setdefault(r.bucket_id, []).append(r.account_id)
+    return out
+
+
+async def spend_by_bucket(session: AsyncSession, month: date) -> dict[int, Decimal]:
+    """Per-bucket spend total for the month. Routing rule:
+    - If tx.account_id is mapped to bucket B (via bucket_account) → tx goes
+      to B regardless of category. Designed for credit cards: every credit
+      tx counts toward "Trả nợ thẻ TD".
+    - Else if tx.category_id is in some bucket B → tx goes to B.
+    - Else: unplanned, not counted in any bucket.
+
+    No double counting — each tx is bucketed by exactly one path. Account
+    mapping wins over category mapping.
+    """
+    start, end = month_window(month)
+    rows = (
+        await session.execute(
+            select(
+                Transaction.account_id,
+                Transaction.category_id,
+                Transaction.amount,
+            )
+            .join(Category, Category.id == Transaction.category_id)
+            .where(
+                Transaction.ts >= start,
+                Transaction.ts < end,
+                Transaction.status == "confirmed",
+                Category.kind == "expense",
+                # Skip transfer pairs — Timo→HSBC payment isn't spend, both
+                # legs would otherwise inflate the credit-card bucket.
+                Transaction.transfer_group_id.is_(None),
+            )
+        )
+    ).all()
+
+    b2a = await bucket_to_accounts(session)
+    b2c = await bucket_to_categories(session)
+    # Inverse maps: 1 account → 1 bucket, 1 category → 1 bucket (enforced
+    # by `set_bucket_accounts` and `set_bucket_categories`).
+    a2b: dict[int, int] = {aid: bid for bid, aids in b2a.items() for aid in aids}
+    c2b: dict[int, int] = {cid: bid for bid, cids in b2c.items() for cid in cids}
+
+    totals: dict[int, Decimal] = {}
+    for r in rows:
+        bid = a2b.get(r.account_id) or c2b.get(r.category_id)
+        if bid is None:
+            continue
+        amt = abs(Decimal(r.amount))
+        totals[bid] = totals.get(bid, Decimal("0")) + amt
+    return {k: v.quantize(Decimal("0.01")) for k, v in totals.items()}
 
 
 async def get_plan_by_month(session: AsyncSession, month: date) -> MonthlyPlan | None:
@@ -137,13 +198,8 @@ async def _bucket_remaining(
         return Decimal("0")
     allocated = resolve_allocated(alloc, plan.expected_income)
 
-    b2c = await bucket_to_categories(session)
-    cat_ids = b2c.get(bucket_id, [])
-    if not cat_ids:
-        return allocated
-
-    spend = await spend_by_category(session, plan.month)
-    spent = sum((spend.get(c, Decimal("0")) for c in cat_ids), Decimal("0"))
+    spend = await spend_by_bucket(session, plan.month)
+    spent = spend.get(bucket_id, Decimal("0"))
     return allocated - spent
 
 
@@ -169,8 +225,10 @@ async def plan_summary(session: AsyncSession, month: date) -> dict:
     plan = await get_plan_by_month(session, m)
 
     actual = await actual_income(session, m)
-    spend = await spend_by_category(session, m)
-    b2c = await bucket_to_categories(session)
+    # Per-bucket spend (account-routing aware) for plan tracking, plus the
+    # per-category spend for the unplanned-total computation.
+    bucket_spend = await spend_by_bucket(session, m)
+    cat_spend = await spend_by_category(session, m)
 
     buckets_rows = (
         await session.execute(
@@ -203,8 +261,7 @@ async def plan_summary(session: AsyncSession, month: date) -> dict:
             method = "amount"
             raw_value = Decimal("0")
 
-        cat_ids = b2c.get(b.id, [])
-        spent = sum((spend.get(c, Decimal("0")) for c in cat_ids), Decimal("0"))
+        spent = bucket_spend.get(b.id, Decimal("0"))
 
         carry = Decimal("0")
         if plan and rollover:
@@ -243,7 +300,7 @@ async def plan_summary(session: AsyncSession, month: date) -> dict:
         )
 
     # unplanned spent = total expense in month minus what's covered by buckets
-    total_expense = sum(spend.values(), Decimal("0.00")).quantize(Decimal("0.01"))
+    total_expense = sum(cat_spend.values(), Decimal("0.00")).quantize(Decimal("0.01"))
     unplanned = (total_expense - total_spent_bucketed).quantize(Decimal("0.01"))
 
     return PlanSummaryOut(

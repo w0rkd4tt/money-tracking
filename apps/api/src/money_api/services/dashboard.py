@@ -60,6 +60,10 @@ def _prev_period_range(period: Period, today: date) -> tuple[datetime, datetime]
 
 
 async def _expense_income(session: AsyncSession, start: datetime, end: datetime):
+    # Transfers between the user's own accounts (e.g. Timo → HSBC credit-card
+    # payment) are NOT spend/earn — exclude any tx that's part of a transfer
+    # pair so the source and credit leg don't double-count as 8M expense for
+    # what's really a 0-net internal move.
     q_exp = (
         select(func.coalesce(func.sum(func.abs(Transaction.amount)), 0))
         .join(Category, Category.id == Transaction.category_id)
@@ -68,6 +72,7 @@ async def _expense_income(session: AsyncSession, start: datetime, end: datetime)
             Transaction.ts < end,
             Transaction.status == "confirmed",
             Category.kind == "expense",
+            Transaction.transfer_group_id.is_(None),
         )
     )
     q_inc = (
@@ -78,6 +83,7 @@ async def _expense_income(session: AsyncSession, start: datetime, end: datetime)
             Transaction.ts < end,
             Transaction.status == "confirmed",
             Category.kind == "income",
+            Transaction.transfer_group_id.is_(None),
         )
     )
     exp = Decimal((await session.execute(q_exp)).scalar_one() or 0)
@@ -113,6 +119,7 @@ async def _cashflow_daily(
             Transaction.ts >= start,
             Transaction.ts < end,
             Transaction.status == "confirmed",
+            Transaction.transfer_group_id.is_(None),
         )
         .group_by(day_col)
         .order_by(day_col)
@@ -195,6 +202,7 @@ async def _breakdown(
             Transaction.ts < end,
             Transaction.status == "confirmed",
             Category.kind == "expense",
+            Transaction.transfer_group_id.is_(None),
         )
         .group_by(Category.id, Category.name)
         .order_by(desc("total"))
@@ -236,6 +244,7 @@ async def _top_merchants(
             Transaction.status == "confirmed",
             Transaction.merchant_id.is_not(None),
             (Category.kind == "expense") | (Category.kind.is_(None)),
+            Transaction.transfer_group_id.is_(None),
         )
         .group_by(Merchant.id, Merchant.name)
         .order_by(desc("total"))

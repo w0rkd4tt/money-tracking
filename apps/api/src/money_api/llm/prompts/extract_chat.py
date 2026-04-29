@@ -6,7 +6,12 @@ Quy tắc:
 - "k" = 1000, "tr" = 1_000_000, "củ" = 1_000_000.
 - Nếu không rõ ngày/giờ → dùng thời điểm hiện tại.
 - account PHẢI khớp 1 trong danh sách tài khoản cho trước (case-insensitive).
-- category dùng đường dẫn cây "Parent > Child". Nếu không chắc → null.
+- category: chọn ĐÚNG 1 path từ danh sách "Category có sẵn", copy NGUYÊN VĂN \
+  cả khoảng trắng + dấu ">". KHÔNG bịa category mới; nếu không có path nào \
+  hợp lý → null. Gợi ý mapping merchant → category: cafe/quán/ăn → "Ăn uống"; \
+  Grab/taxi/xăng → "Đi lại"; Shopee/Lazada/cửa hàng → "Mua sắm"; \
+  điện/nước/internet → "Hoá đơn"; phòng trọ/tiền nhà → "Nhà ở"; \
+  lương/thưởng → "Lương"/"Thưởng".
 - kind = "expense" mặc định; "income" nếu câu có "nhận", "lương", "thưởng", "refund";
   "transfer" nếu có "rút", "nạp", "chuyển", "sang X", "về Y".
 - Với transfer: account=nguồn, to_account=đích.
@@ -61,11 +66,13 @@ def build_user_prompt(
 ) -> str:
     import json as _json
 
+    cat_block = "\n".join(f"- {c}" for c in categories[:80])
+
     return f"""# Tài khoản
 {_json.dumps(accounts, ensure_ascii=False, indent=2)}
 
-# Category (đường dẫn, rút gọn)
-{chr(10).join(categories[:60])}
+# Category có sẵn (copy nguyên văn 1 path nếu phù hợp, hoặc null)
+{cat_block}
 
 # Merchant gần đây (top 20)
 {", ".join(merchants[:20])}

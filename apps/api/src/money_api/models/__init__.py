@@ -1,6 +1,6 @@
 from .account import Account
 from .budget import Budget
-from .bucket import AllocationBucket, BucketCategory
+from .bucket import AllocationBucket, BucketAccount, BucketCategory
 from .category import Category
 from .chat import ChatMessage, ChatSession
 from .llm import LlmGmailPolicy, LlmProvider, LlmToolCallLog, LlmToolSearchCache
@@ -20,6 +20,7 @@ __all__ = [
     "AllocationBucket",
     "AppSetting",
     "Budget",
+    "BucketAccount",
     "BucketCategory",
     "Category",
     "ChatMessage",

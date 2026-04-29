@@ -35,6 +35,84 @@ async def test_bucket_crud(seeded):
 
 
 @pytest.mark.asyncio
+async def test_bucket_account_routing(seeded):
+    """Account-level mapping wins over category mapping. A coffee paid on a
+    credit card lands in the credit-debt bucket regardless of merchant."""
+    client = seeded
+    cats = (await client.get("/api/v1/categories")).json()
+    food_id = next(c["id"] for c in cats if c["name"] == "Ăn uống")
+    accts = (await client.get("/api/v1/accounts")).json()
+    cash_id = next(a["id"] for a in accts if a["name"] == "Tiền mặt")
+
+    # Create a credit account — auto-link to "Trả nợ thẻ TD" only fires if
+    # the bucket exists by that exact name, so we create it first.
+    debt_b = (
+        await client.post(
+            "/api/v1/buckets",
+            json={"name": "Trả nợ thẻ TD", "icon": "💳", "category_ids": []},
+        )
+    ).json()
+    cc = (
+        await client.post(
+            "/api/v1/accounts",
+            json={"name": "Visa", "type": "credit", "currency": "VND"},
+        )
+    ).json()
+
+    # Auto-link should have happened on POST /accounts
+    debt_b_after = (
+        await client.get(f"/api/v1/buckets/{debt_b['id']}")
+    ).json()
+    assert cc["id"] in debt_b_after["account_ids"]
+
+    # Build the regular Thiết yếu bucket with Ăn uống category
+    food_b = (
+        await client.post(
+            "/api/v1/buckets",
+            json={"name": "Thiết yếu", "category_ids": [food_id]},
+        )
+    ).json()
+
+    # Plan: 10M expected, 5M to each bucket
+    await client.post(
+        "/api/v1/plans",
+        json={
+            "month": "2026-04-01",
+            "expected_income": "10000000",
+            "strategy": "soft",
+            "allocations": [
+                {"bucket_id": food_b["id"], "method": "amount", "value": "5000000", "rollover": False},
+                {"bucket_id": debt_b["id"], "method": "amount", "value": "5000000", "rollover": False},
+            ],
+        },
+    )
+
+    # Two coffees: 100k on cash → Thiết yếu, 200k on credit → Trả nợ thẻ TD
+    for amount, account_id in [("-100000", cash_id), ("-200000", cc["id"])]:
+        await client.post(
+            "/api/v1/transactions",
+            json={
+                "ts": "2026-04-15T12:00:00",
+                "amount": amount,
+                "account_id": account_id,
+                "category_id": food_id,
+                "source": "manual",
+                "status": "confirmed",
+            },
+        )
+
+    summary = (await client.get("/api/v1/plans/2026-04/summary")).json()
+    food_status = next(x for x in summary["buckets"] if x["bucket_name"] == "Thiết yếu")
+    debt_status = next(x for x in summary["buckets"] if x["bucket_name"] == "Trả nợ thẻ TD")
+    # Cash coffee → category routing → Thiết yếu
+    assert food_status["spent"] == "100000.00"
+    # Credit coffee → account routing → Trả nợ thẻ TD (NOT Thiết yếu)
+    assert debt_status["spent"] == "200000.00"
+    # No double counting — total spent equals sum of cash + credit
+    assert summary["total_spent"] == "300000.00"
+
+
+@pytest.mark.asyncio
 async def test_bucket_rejects_non_expense_category(seeded):
     client = seeded
     cats = (await client.get("/api/v1/categories")).json()

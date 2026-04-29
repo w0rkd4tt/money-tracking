@@ -3,11 +3,43 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_session
-from ..models import Account
+from ..models import Account, AllocationBucket, BucketAccount
 from ..schemas.account import AccountCreate, AccountOut, AccountUpdate, BalanceOut
 from ..services.balances import compute_balances
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
+
+# Credit accounts auto-link to this bucket on creation. Match by name so the
+# seed-default bucket "Trả nợ thẻ TD" picks it up. If a user renames or
+# deletes the bucket, the auto-link is silently skipped — they can map
+# manually via PATCH /buckets/{id}.
+CREDIT_BUCKET_NAME = "Trả nợ thẻ TD"
+
+
+async def _auto_link_credit_account(
+    session: AsyncSession, account: Account
+) -> None:
+    if account.type != "credit":
+        return
+    bucket = (
+        await session.execute(
+            select(AllocationBucket).where(AllocationBucket.name == CREDIT_BUCKET_NAME)
+        )
+    ).scalar_one_or_none()
+    if bucket is None:
+        return
+    # Skip if already linked (idempotent re-creates / patches)
+    existing = (
+        await session.execute(
+            select(BucketAccount).where(
+                BucketAccount.bucket_id == bucket.id,
+                BucketAccount.account_id == account.id,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return
+    session.add(BucketAccount(bucket_id=bucket.id, account_id=account.id))
 
 
 @router.get("", response_model=list[AccountOut])
@@ -29,10 +61,12 @@ async def create_account(data: AccountCreate, session: AsyncSession = Depends(ge
     acc = Account(**data.model_dump())
     session.add(acc)
     try:
-        await session.commit()
+        await session.flush()
     except Exception as e:
         await session.rollback()
         raise HTTPException(409, f"duplicate account name: {e}") from e
+    await _auto_link_credit_account(session, acc)
+    await session.commit()
     await session.refresh(acc)
     return acc
 

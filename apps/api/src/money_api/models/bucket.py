@@ -29,3 +29,24 @@ class BucketCategory(Base):
     category_id: Mapped[int] = mapped_column(
         ForeignKey("category.id", ondelete="CASCADE"), primary_key=True
     )
+
+
+class BucketAccount(Base):
+    """Account-level bucket routing.
+
+    A tx whose `account_id` lands here is bucketed by account, *bypassing*
+    its category. Designed for credit cards: every credit purchase counts
+    toward "Trả nợ thẻ TD" regardless of merchant. Categories still serve
+    analytics (a "Ăn uống" report aggregates across cash + credit) but the
+    plan/bucket spend calc routes by account first.
+    """
+
+    __tablename__ = "bucket_account"
+    __table_args__ = (Index("ix_bucket_account_account", "account_id"),)
+
+    bucket_id: Mapped[int] = mapped_column(
+        ForeignKey("allocation_bucket.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[int] = mapped_column(
+        ForeignKey("account.id", ondelete="CASCADE"), primary_key=True
+    )

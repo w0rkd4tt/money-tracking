@@ -20,9 +20,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
+from ..llm.category_match import (
+    load_user_categories,
+    validate_llm_category,
+)
 from ..llm.prompts.extract_email import (
+    CLASSIFY_CATEGORY_SCHEMA,
+    CLASSIFY_CATEGORY_SYSTEM_V1,
     EXTRACT_EMAIL_SCHEMA,
     EXTRACT_EMAIL_SYSTEM_V1,
+    build_classify_user_prompt,
     build_user_prompt,
 )
 from ..llm.provider import (
@@ -32,7 +39,7 @@ from ..llm.provider import (
     resolve_provider,
 )
 from ..llm.redact import redact
-from ..models import Account, Category
+from ..models import Account
 from .gmail_parser import ParsedTx, RawEmail
 
 log = logging.getLogger(__name__)
@@ -44,15 +51,16 @@ async def _build_context(session: AsyncSession) -> dict[str, Any]:
             select(Account.name, Account.type, Account.currency).where(Account.archived.is_(False))
         )
     ).all()
-    cats = (
-        await session.execute(
-            select(Category.path).where(Category.kind.in_(["expense", "income"]))
-        )
-    ).all()
+    paths, canonical = await load_user_categories(
+        session, kinds=["expense", "income"]
+    )
     tz = ZoneInfo(get_settings().tz)
     return {
         "accounts": [{"name": a.name, "type": a.type, "currency": a.currency} for a in accs],
-        "categories": [c.path for c in cats if c.path],
+        "categories": paths,
+        # Pre-built normalised lookup so the extract validator can canonicalise
+        # an LLM output without re-querying the DB.
+        "category_canonical": canonical,
         "now_iso": datetime.now(tz).isoformat(),
     }
 
@@ -182,6 +190,27 @@ async def llm_extract_from_email(
     else:
         ts = datetime.now()
 
+    # Validate the LLM-picked category against the user's actual tree. The
+    # resolver has a fuzzy fallback for legacy / hand-typed inputs, but the
+    # LLM should always emit a real path since we hand it the full list.
+    # Anything off-list is most likely a hallucination ("Đồ ăn", "Coffee")
+    # that would fuzzy-match to the wrong row — kill it here so the resolver
+    # falls cleanly to "Chưa phân loại".
+    raw_category = data.get("category")
+    canonical_map: dict[str, str] = ctx.get("category_canonical") or {}
+    resolved_category = validate_llm_category(raw_category, canonical_map)
+    if isinstance(raw_category, str) and raw_category.strip() and resolved_category is None:
+        log.info(
+            "LLM extract proposed category %r not in user list — dropping",
+            raw_category,
+        )
+    log.info(
+        "LLM extract for %s → category=%r (raw=%r)",
+        raw.message_id,
+        resolved_category,
+        raw_category,
+    )
+
     return ParsedTx(
         amount=Decimal(amount),
         currency=data.get("currency") or "VND",
@@ -193,10 +222,83 @@ async def llm_extract_from_email(
         ts=ts,
         rule_name="llm-fallback",
         confidence=float(data.get("confidence") or 0.7),
-        category=(data.get("category") or None),
+        category=resolved_category,
         extra={
             "sender": raw.from_addr,
             "message_id": raw.message_id,
             "llm_reason": data.get("reason"),
         },
     )
+
+
+async def llm_classify_email_category(
+    session: AsyncSession,
+    raw: RawEmail,
+    merchant: str | None,
+    amount: int,
+    kind: str,
+) -> str | None:
+    """Ask the LLM to pick a category path for an already-extracted transaction.
+
+    Used when the rule engine produced amount/account/ts/merchant but couldn't
+    decide a category (most bank emails: rule sets `category_hint="Chưa phân
+    loại"`). Lighter than `llm_extract_from_email` — only the category field —
+    so it's affordable to call on every rule match without budget concerns.
+
+    The candidate list is filtered to the transaction's own kind (expense vs
+    income) so the model can't suggest "Lương" for a coffee spend or "Ăn
+    uống" for incoming salary. The LLM's reply is then validated against the
+    exact user list (case + whitespace insensitive) — anything outside that
+    list is rejected and we return None, leaving the rule's "Chưa phân loại"
+    in place rather than letting the resolver fuzzy-match to a wrong row.
+    """
+    # 1. Load the user's actual categories of the matching kind. Transfers
+    #    are not user-classifiable in this flow. Skip "Chưa phân loại" so
+    #    the model is forced to either pick a real bucket or return null.
+    target_kind = kind if kind in {"expense", "income"} else "expense"
+    paths, norm_to_canonical = await load_user_categories(
+        session, kinds=[target_kind], exclude_paths=["Chưa phân loại"]
+    )
+    if not paths:
+        return None
+
+    body_redacted = redact(raw.body_text or "")
+    prompt = build_classify_user_prompt(
+        sender=raw.from_addr,
+        merchant=merchant,
+        amount=amount,
+        kind=kind,
+        body_redacted=body_redacted,
+        category_hints=paths,
+    )
+    messages = [
+        {"role": "system", "content": CLASSIFY_CATEGORY_SYSTEM_V1},
+        {"role": "user", "content": prompt},
+    ]
+
+    try:
+        provider = await resolve_provider(session)
+        data = await provider.chat(
+            messages,
+            schema=CLASSIFY_CATEGORY_SCHEMA,
+            temperature=0.0,
+            num_predict=80,
+            think=False,
+        )
+    except (LLMUnavailable, LLMInvalidOutput, LLMProviderNotFound) as e:
+        log.warning("LLM category classify failed for %s: %s", raw.message_id, e)
+        return None
+
+    if isinstance(data, list) and data:
+        data = data[0]
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("category")
+    canonical = validate_llm_category(raw, norm_to_canonical)
+    if canonical is None and isinstance(raw, str) and raw.strip():
+        log.info(
+            "LLM classify proposed %r not in user list (kind=%s) — rejecting",
+            raw,
+            target_kind,
+        )
+    return canonical

@@ -40,6 +40,8 @@ DEFAULT_CATEGORIES: list[tuple[str, str, str | None, str | None]] = [
     ("Đi lại", "expense", None, "🚗"),
     ("Grab", "expense", "Đi lại", None),
     ("Xăng xe", "expense", "Đi lại", None),
+    ("Nhà ở", "expense", None, "🏠"),
+    ("Tiền thuê", "expense", "Nhà ở", "🛏️"),
     ("Hoá đơn", "expense", None, "💡"),
     ("Điện nước", "expense", "Hoá đơn", None),
     ("Internet", "expense", "Hoá đơn", None),

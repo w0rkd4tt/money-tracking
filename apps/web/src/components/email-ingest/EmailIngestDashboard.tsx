@@ -46,14 +46,18 @@ async function jfetch<T>(path: string, init?: RequestInit): Promise<T> {
   return r.json();
 }
 
+type CreditAccount = { id: number; name: string };
+
 export function EmailIngestDashboard({
   initialItems,
   initialStats,
   categories = [],
+  creditAccounts = [],
 }: {
   initialItems: IngestedItem[];
   initialStats: Stats;
   categories?: Category[];
+  creditAccounts?: CreditAccount[];
 }) {
   const [items, setItems] = useState<IngestedItem[]>(initialItems);
   const [stats, setStats] = useState<Stats>(initialStats);
@@ -63,6 +67,12 @@ export function EmailIngestDashboard({
   const [syncMsg, setSyncMsg] = useState<string | null>(null);
   const [savingCatFor, setSavingCatFor] = useState<number | null>(null);
   const [editingCatFor, setEditingCatFor] = useState<number | null>(null);
+  // Per-row chosen credit account for "Thanh toán thẻ TD" linkage. Auto-fills
+  // when there's exactly one credit account so the user only has to confirm.
+  const [creditDestFor, setCreditDestFor] = useState<Record<number, number>>(() => {
+    if (creditAccounts.length !== 1) return {};
+    return {}; // populated lazily when row matches the credit-payment pattern
+  });
 
   // Lookup by id for fast re-rendering after patch + to get path/name.
   const catById = useMemo(
@@ -110,7 +120,7 @@ export function EmailIngestDashboard({
 
   const sync = async () => {
     setSyncing(true);
-    setSyncMsg("⏳ Đang sync nền (có thể 1–2 phút)…");
+    setSyncMsg("⏳ Đang sync nền (có thể 1–5 phút, LLM extract tốn thời gian)…");
     try {
       // Fire-and-forget kick: server returns 200 immediately, actual work runs
       // in a BackgroundTask on FastAPI side. We then poll /sync/status until
@@ -119,8 +129,6 @@ export function EmailIngestDashboard({
         method: "POST",
       });
 
-      // Poll up to 4 minutes at 3s intervals (80 attempts). Aborts early when
-      // `running` flips false AND we have a last_result we didn't see before.
       type StatusResp = {
         running: boolean;
         last_result: null | {
@@ -139,12 +147,18 @@ export function EmailIngestDashboard({
       const baseline = await jfetch<StatusResp>("/api/v1/gmail/sync/status");
       const baselineFinishedAt = baseline.last_result?.finished_at ?? null;
 
+      // Poll up to 10 minutes at 3s intervals. LLM-heavy syncs (each email
+      // triggers a 5–10s classifier call) can push past 4 minutes when there
+      // are 20+ emails to process. Refresh the table every 6s so the user
+      // sees new pending rows appearing rather than a frozen UI.
+      const POLL_TIMEOUT_MS = 10 * 60 * 1000;
       const started = Date.now();
       let final: StatusResp["last_result"] = null;
-      while (Date.now() - started < 4 * 60 * 1000) {
+      let pollCount = 0;
+      while (Date.now() - started < POLL_TIMEOUT_MS) {
         await new Promise((r) => setTimeout(r, 3000));
+        pollCount++;
         const s = await jfetch<StatusResp>("/api/v1/gmail/sync/status");
-        // New result detected (finished_at changed) AND no longer running
         if (
           !s.running &&
           s.last_result &&
@@ -152,6 +166,14 @@ export function EmailIngestDashboard({
         ) {
           final = s.last_result;
           break;
+        }
+        // Live progress: refresh the table (and elapsed counter) every 2nd
+        // poll so the user sees rows trickling in.
+        if (pollCount % 2 === 0) {
+          const elapsed = Math.floor((Date.now() - started) / 1000);
+          setSyncMsg(`⏳ Đang sync… ${elapsed}s (LLM extract đang chạy)`);
+          // fire-and-forget — don't await so polling rhythm stays steady
+          void refresh();
         }
       }
       if (final) {
@@ -161,7 +183,9 @@ export function EmailIngestDashboard({
             : `❌ ${final.message}`
         );
       } else {
-        setSyncMsg("⚠ timeout chờ sync — refresh thủ công nếu cần");
+        setSyncMsg(
+          "⚠ Timeout 10 phút — server có thể vẫn đang chạy nền, refresh sau ít phút.",
+        );
       }
       await refresh();
     } catch (e) {
@@ -171,7 +195,50 @@ export function EmailIngestDashboard({
     }
   };
 
+  // Match a category name that means "I'm paying a credit-card bill". Used
+  // to surface the credit-account picker on rows like Timo "Mô tả: Tra no
+  // tin dung HSBC".
+  const isCreditPaymentCategory = (name: string | null): boolean => {
+    if (!name) return false;
+    const n = name.toLowerCase();
+    return (
+      n.includes("thanh toán thẻ td") ||
+      n.includes("dư nợ thẻ tín dụng") ||
+      n.includes("trả nợ thẻ")
+    );
+  };
+
   const confirm = async (id: number) => {
+    // If the row is a credit-card payment AND a destination credit account
+    // is resolved (user-picked OR the lone existing credit account), link
+    // the transfer pair BEFORE flipping status. Both legs (source +
+    // credit-leg) then appear together and the credit account's debt
+    // updates immediately.
+    const it = items.find((x) => x.transaction_id === id);
+    // Match the same auto-pick fallback shown in the select's `value`
+    // attribute — otherwise single-credit users would see HSBC pre-selected
+    // but the state would be undefined and the link call would skip.
+    const dest =
+      creditDestFor[id] ??
+      (creditAccounts.length === 1 ? creditAccounts[0].id : undefined);
+    if (it && isCreditPaymentCategory(it.category_name) && dest) {
+      try {
+        const r = await fetch(
+          `/api/v1/transactions/${id}/link-credit-payment`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ credit_account_id: dest }),
+            cache: "no-store",
+          },
+        );
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`);
+      } catch (e) {
+        alert(
+          `Không link được thẻ TD: ${(e as Error).message}. Tx vẫn confirm.`,
+        );
+      }
+    }
     await jfetch(`/api/v1/transactions/${id}/confirm`, { method: "POST" });
     await refresh();
   };
@@ -462,19 +529,50 @@ export function EmailIngestDashboard({
                   </td>
                   <td>
                     {it.status === "pending" && (
-                      <div className="flex gap-1">
-                        <button
-                          onClick={() => confirm(it.transaction_id)}
-                          className="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-2 py-0.5"
-                        >
-                          ✓
-                        </button>
-                        <button
-                          onClick={() => reject(it.transaction_id)}
-                          className="text-xs bg-red-800 hover:bg-red-700 text-white rounded px-2 py-0.5"
-                        >
-                          ✗
-                        </button>
+                      <div className="flex flex-col gap-1">
+                        {isCreditPaymentCategory(it.category_name) &&
+                          creditAccounts.length > 0 && (
+                            <select
+                              value={
+                                creditDestFor[it.transaction_id] ??
+                                (creditAccounts.length === 1
+                                  ? creditAccounts[0].id
+                                  : "")
+                              }
+                              onChange={(e) => {
+                                const v = e.target.value;
+                                setCreditDestFor((m) => ({
+                                  ...m,
+                                  [it.transaction_id]: Number(v),
+                                }));
+                              }}
+                              className="field !py-0.5 !text-[10px] max-w-[120px]"
+                              title="Chọn thẻ TD đích — confirm sẽ tự link transfer"
+                            >
+                              {creditAccounts.length > 1 && (
+                                <option value="">— thẻ TD —</option>
+                              )}
+                              {creditAccounts.map((ca) => (
+                                <option key={ca.id} value={ca.id}>
+                                  → {ca.name}
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        <div className="flex gap-1">
+                          <button
+                            onClick={() => confirm(it.transaction_id)}
+                            className="text-xs bg-green-700 hover:bg-green-600 text-white rounded px-2 py-0.5"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            onClick={() => reject(it.transaction_id)}
+                            className="text-xs bg-red-800 hover:bg-red-700 text-white rounded px-2 py-0.5"
+                          >
+                            ✗
+                          </button>
+                        </div>
                       </div>
                     )}
                   </td>
